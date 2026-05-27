@@ -1,0 +1,92 @@
+[project]
+name = "langgraph-up-react"
+version = "0.2.1"
+description = "Starter template for making a custom Reasoning and Action agent (using tool calling) in LangGraph."
+authors = [
+    { name = "Haili Zhang", email = "haili.zhang@outlook.com" },
+    { name = "Claude Code", email = "claude-code@anthropic.com" },
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<4.0"
+urls = { Homepage = "https://github.com/webup/langgraph-up-react", Repository = "https://github.com/webup/langgraph-up-react", Issues = "https://github.com/webup/langgraph-up-react/issues", Releases = "https://github.com/webup/langgraph-up-react/releases" }
+dependencies = [
+    "langgraph>=0.6.0,<0.7.0",
+    "langchain-openai>=0.1.22",
+    "langchain-anthropic>=0.1.23",
+    "langchain>=0.2.14",
+    "python-dotenv>=1.0.1",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "chromadb>=0.5.0",
+    "sentence-transformers>=3.0.0",
+    "langchain-tavily>=0.1",
+    "langchain-qwq>=0.2.1",
+    "langchain-mcp-adapters>=0.1.9",
+    "langchain-siliconflow>=0.1.3",
+]
+
+
+[project.optional-dependencies]
+dev = ["ipykernel>=6.29.5", "mypy>=1.11.1", "ruff>=0.6.1"]
+
+[build-system]
+requires = ["setuptools>=73.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["langgraph.templates.react_agent", "react_agent", "common", "job_agent", "job_agent.tools"]
+[tool.setuptools.package-dir]
+"langgraph.templates.react_agent" = "src/react_agent"
+"react_agent" = "src/react_agent"
+"common" = "src/common"
+"job_agent" = "src/job_agent"
+"job_agent.tools" = "src/job_agent/tools"
+
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+
+[tool.ruff]
+lint.select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "D",    # pydocstyle
+    "D401", # First line should be in imperative mood
+    "T201",
+    "UP",
+]
+lint.ignore = [
+    "UP006",
+    "UP007",
+    # We actually do want to import from typing_extensions
+    "UP035",
+    # Relax the convention by _not_ requiring documentation for every function parameter.
+    "D417",
+    "E501",
+]
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "UP"]
+"tests/evaluations/*" = ["D", "UP", "T201"]  # Allow print statements in evaluation scripts
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[dependency-groups]
+dev = [
+    "langgraph-cli[inmem]>=0.1.71",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.23.0",
+    "langgraph-sdk>=0.1.0",
+    "mypy>=1.17.1",
+    "ruff>=0.9.10",
+    "openevals>=0.1.0",
+    "agentevals>=0.0.9",
+    "langsmith[pytest]>=0.4.16",
+    "pytest-xdist>=3.8.0",
+    "ipykernel>=6.29.5",
+]
