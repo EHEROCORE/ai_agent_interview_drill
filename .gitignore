@@ -170,6 +170,12 @@ cython_debug/
 *.sqlite-journal
 reports/job_agent/
 reports/eval/traces/
+reports/traces/
+reports/eval_v2/
+reports/eval_compare/
+reports/eval_semantic/
+reports/eval_semantic_*/
+reports/**/traces/
 
 # macOS
 .DS_Store

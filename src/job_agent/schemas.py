@@ -19,6 +19,13 @@ class PrepareRequest(AgentBaseModel):
     cv_file_path: str | None = Field(default=None, max_length=500)
     target_interview_type: str = Field(default="AI Agent / LLM application")
 
+    # SaaS governance fields (backward compatible defaults).
+    tenant_id: str = Field(default="default", min_length=1, max_length=120)
+    user_id: str = Field(default="anonymous", min_length=1, max_length=120)
+    user_roles: list[str] = Field(default_factory=lambda: ["public"])
+    retrieval_mode: Literal["deterministic", "dense", "hybrid"] = "deterministic"
+    llm_mode: Literal["off", "auto"] = "off"
+
     @field_validator("company", "role", "target_interview_type")
     @classmethod
     def strip_short_text(cls, value: str) -> str:
@@ -42,11 +49,17 @@ class FeedbackRequest(AgentBaseModel):
 
 
 class GuardrailResult(AgentBaseModel):
-    """Guardrail decision and reasons."""
+    """Guardrail decision and reasons.
+
+    ``classification`` upgrades the binary blocked flag into an action category so
+    the workflow can sanitize, ask for clarification, or hard-block as appropriate.
+    """
 
     blocked: bool
     risk_score: float = Field(ge=0.0, le=1.0)
     reasons: list[str] = Field(default_factory=list)
+    classification: Literal["pass", "sanitize", "clarify", "block"] = "pass"
+    unsupported_claims: list[str] = Field(default_factory=list)
 
 
 class Requirement(AgentBaseModel):
@@ -96,6 +109,16 @@ class ToolTrace(AgentBaseModel):
     observation: dict[str, Any] = Field(default_factory=dict)
 
 
+class NodeTrace(AgentBaseModel):
+    """Trace entry for a single graph node execution."""
+
+    node: str
+    status: Literal["ok", "error", "skipped", "blocked"]
+    latency_ms: float
+    checkpoint: bool = False
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
 class Metrics(AgentBaseModel):
     """Request-level observability metrics."""
 
@@ -105,6 +128,8 @@ class Metrics(AgentBaseModel):
     tool_call_count: int
     guardrail_pass: bool
     citation_count: int
+    retrieval_rounds: int = 1
+    cache_hits: int = 0
 
 
 class PrepareResponse(AgentBaseModel):
@@ -114,14 +139,18 @@ class PrepareResponse(AgentBaseModel):
     request_id: str
     company: str
     role: str
+    intent: str = ""
+    selected_retrievers: list[str] = Field(default_factory=list)
     report: str
     report_path: str
     citations: list[RetrievedChunk]
     matches: list[MatchItem]
     interview_questions: list[str]
     guardrail: GuardrailResult
+    output_guardrail: GuardrailResult | None = None
     metrics: Metrics
     tool_trace: list[ToolTrace]
+    node_trace: list[NodeTrace] = Field(default_factory=list)
 
 
 class SessionRecord(AgentBaseModel):

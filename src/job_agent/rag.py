@@ -62,9 +62,16 @@ class HybridRAGIndex:
         source_path: str,
         source_type: str,
         metadata: dict[str, str] | None = None,
+        tenant_id: str = "default",
+        acl_roles: list[str] | None = None,
     ) -> None:
-        """Chunk and index a document."""
-        base_metadata = {"source_type": source_type, **(metadata or {})}
+        """Chunk and index a document with tenant isolation and ACL payload."""
+        base_metadata = {
+            "source_type": source_type,
+            "tenant_id": tenant_id,
+            "acl_roles": ",".join(acl_roles or ["public"]),
+            **(metadata or {}),
+        }
         for chunk_text in chunk_text_by_section(text):
             citation_id = f"C{len(self._chunks) + 1}"
             self._chunks.append(
@@ -77,7 +84,13 @@ class HybridRAGIndex:
                 )
             )
 
-    def ingest_paths(self, paths: list[Path], source_type: str) -> None:
+    def ingest_paths(
+        self,
+        paths: list[Path],
+        source_type: str,
+        tenant_id: str = "default",
+        acl_roles: list[str] | None = None,
+    ) -> None:
         """Index a list of text/markdown files."""
         for path in paths:
             if path.exists() and path.is_file():
@@ -85,21 +98,41 @@ class HybridRAGIndex:
                     path.read_text(encoding="utf-8", errors="ignore"),
                     source_path=str(path),
                     source_type=source_type,
+                    tenant_id=tenant_id,
+                    acl_roles=acl_roles,
                 )
+
+    @staticmethod
+    def _acl_ok(chunk: DocumentChunk, user_roles: list[str] | None) -> bool:
+        """Post-retrieval ACL check: caller role must intersect chunk ACL (or public)."""
+        chunk_roles = set((chunk.metadata.get("acl_roles") or "public").split(","))
+        if "public" in chunk_roles:
+            return True
+        return bool(set(user_roles or ["public"]) & chunk_roles)
 
     def query(
         self,
         query: str,
         filters: dict[str, str] | None = None,
         top_k: int = 5,
+        tenant_id: str | None = None,
+        user_roles: list[str] | None = None,
     ) -> list[RetrievedChunk]:
-        """Retrieve top chunks using lexical cosine plus keyword overlap."""
+        """Retrieve top chunks using lexical cosine plus keyword overlap.
+
+        Enforces tenant isolation (``tenant_id``) and ACL (``user_roles``) as hard
+        payload filters before scoring, mirroring a production vector-store filter.
+        """
         filters = filters or {}
         query_tokens = Counter(tokenize(query))
         scored: list[tuple[float, DocumentChunk]] = []
 
         for chunk in self._chunks:
             if any(chunk.metadata.get(key) != value for key, value in filters.items()):
+                continue
+            if tenant_id is not None and chunk.metadata.get("tenant_id", "default") != tenant_id:
+                continue
+            if not self._acl_ok(chunk, user_roles):
                 continue
             lexical = _cosine(query_tokens, chunk.tokens)
             overlap = len(set(query_tokens) & set(chunk.tokens))

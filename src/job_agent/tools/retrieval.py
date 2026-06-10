@@ -14,15 +14,29 @@ def build_default_index(
     job_description: str,
     company: str,
     role: str,
+    tenant_id: str = "default",
 ) -> HybridRAGIndex:
-    """Build a local RAG index from workspace files and request documents."""
+    """Build a local RAG index from workspace files and request documents.
+
+    Request-supplied CV/JD documents are tenant-scoped and ACL-restricted to the
+    owning tenant; shared workspace knowledge is indexed as ``public``.
+    """
     index = HybridRAGIndex()
-    index.add_document(cv_text, "request:cv", "cv", {"company": company, "role": role})
+    index.add_document(
+        cv_text,
+        "request:cv",
+        "cv",
+        {"company": company, "role": role},
+        tenant_id=tenant_id,
+        acl_roles=[f"tenant:{tenant_id}"],
+    )
     index.add_document(
         job_description,
         "request:job_description",
         "job_description",
         {"company": company, "role": role},
+        tenant_id=tenant_id,
+        acl_roles=[f"tenant:{tenant_id}"],
     )
 
     workspace_root = project_root.parent
@@ -31,7 +45,7 @@ def build_default_index(
         ("resume_drafts/*.md", "project_note"),
         ("plans/*.md", "planning_note"),
     ]:
-        index.ingest_paths(list(workspace_root.glob(pattern)), source_type)
+        index.ingest_paths(list(workspace_root.glob(pattern)), source_type, tenant_id=tenant_id)
 
     data_root = project_root / "data"
     for pattern, source_type in [
@@ -39,7 +53,7 @@ def build_default_index(
         ("jd/*.md", "job_description"),
         ("cv/*.md", "cv"),
     ]:
-        index.ingest_paths(list(data_root.glob(pattern)), source_type)
+        index.ingest_paths(list(data_root.glob(pattern)), source_type, tenant_id=tenant_id)
 
     return index
 
@@ -49,6 +63,14 @@ def rag_retrieval_tool(
     query: str,
     filters: dict[str, str] | None = None,
     top_k: int = 5,
+    tenant_id: str | None = None,
+    user_roles: list[str] | None = None,
 ) -> list[RetrievedChunk]:
-    """Retrieve cited evidence from the local RAG index."""
-    return index.query(query=query, filters=filters, top_k=top_k)
+    """Retrieve cited evidence from the local RAG index with tenant/ACL enforcement."""
+    return index.query(
+        query=query,
+        filters=filters,
+        top_k=top_k,
+        tenant_id=tenant_id,
+        user_roles=user_roles,
+    )

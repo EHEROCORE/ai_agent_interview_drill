@@ -69,6 +69,18 @@ class SessionStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
 
     def save_session(self, record: SessionRecord) -> None:
         """Upsert a session state record."""
@@ -162,6 +174,45 @@ class SessionStore:
                 """,
                 (args_hash, json.dumps(result, ensure_ascii=False)),
             )
+
+    def save_checkpoint(
+        self, session_id: str, node: str, status: str, state: dict[str, Any]
+    ) -> None:
+        """Persist a node-level checkpoint snapshot for recovery."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO checkpoints (session_id, node, status, state_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, node, status, json.dumps(state, ensure_ascii=False, default=str)),
+            )
+
+    def get_latest_checkpoint(self, session_id: str) -> tuple[str, str, dict[str, Any]] | None:
+        """Return the most recent checkpoint as ``(node, status, state)``."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT node, status, state_json FROM checkpoints
+                WHERE session_id = ? ORDER BY id DESC LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0], row[1], json.loads(row[2])
+
+    def get_completed_nodes(self, session_id: str) -> list[str]:
+        """Return node names that completed successfully, in execution order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT node FROM checkpoints
+                WHERE session_id = ? AND status = 'ok' ORDER BY id
+                """,
+                (session_id,),
+            ).fetchall()
+        return [row[0] for row in rows]
 
     def save_feedback(self, session_id: str, feedback: FeedbackRequest) -> None:
         """Save user feedback."""
