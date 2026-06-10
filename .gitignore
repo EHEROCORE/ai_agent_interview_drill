@@ -175,6 +175,11 @@ reports/eval_v2/
 reports/eval_compare/
 reports/eval_semantic/
 reports/eval_semantic_*/
+reports/fusion_sweep*/
+reports/rerank_compare*/
+reports/intent_compare*/
+reports/routing_compare*/
+reports/embedding_cache*.sqlite
 reports/**/traces/
 
 # macOS

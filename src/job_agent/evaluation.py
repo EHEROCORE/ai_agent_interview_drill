@@ -191,9 +191,14 @@ def evaluate_case(case: dict[str, Any], store: SessionStore) -> dict[str, Any]:
         and guardrail_correct and must_not_violations == 0
     ) else 0.0
 
+    # Evidence sufficiency: did the agent end with any requirement still unsupported?
+    evidence_sufficiency = 0.0 if any(m.match_level == "gap" for m in response.matches) else 1.0
+
     return {
         "id": case["id"],
         "task_type": case.get("task_type", "unknown"),
+        "expected_intent": expected_intent or "",
+        "predicted_intent": response.intent,
         # retrieval
         "recall_at_k": round(recall, 4),
         "mrr": round(mrr(citations, gold), 4),
@@ -214,6 +219,7 @@ def evaluate_case(case: dict[str, Any], store: SessionStore) -> dict[str, Any]:
         "tool_call_validity": tool_validity,
         "trajectory_correctness": _trajectory_ok(response, expect_block),
         "guardrail_correct": guardrail_correct,
+        "evidence_sufficiency": evidence_sufficiency,
         "resilience_ok": resilience_ok,
         # ops
         "ttft_ms": response.metrics.ttft_ms,
@@ -262,9 +268,54 @@ _AVG_KEYS = [
     "recall_at_k", "mrr", "ndcg_at_k", "context_precision",
     "citation_accuracy", "faithfulness", "answer_coverage", "report_completeness",
     "intent_accuracy", "retriever_selection_accuracy", "tool_call_validity",
-    "trajectory_correctness", "guardrail_correct", "resilience_ok",
+    "trajectory_correctness", "guardrail_correct", "evidence_sufficiency", "resilience_ok",
     "task_success_rate",
 ]
+
+
+def intent_confusion(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build an intent confusion matrix and the most-confused (expected, predicted) pairs."""
+    matrix: dict[str, dict[str, int]] = {}
+    confused: dict[tuple[str, str], list[str]] = {}
+    for row in rows:
+        exp = row.get("expected_intent") or ""
+        pred = row.get("predicted_intent") or ""
+        if not exp:
+            continue
+        matrix.setdefault(exp, {})
+        matrix[exp][pred] = matrix[exp].get(pred, 0) + 1
+        if exp != pred:
+            confused.setdefault((exp, pred), []).append(row["id"])
+    top = sorted(confused.items(), key=lambda kv: -len(kv[1]))
+    return {
+        "matrix": matrix,
+        "top_confused": [
+            {"expected": e, "predicted": p, "count": len(ids), "examples": ids[:5]}
+            for (e, p), ids in top
+        ],
+    }
+
+
+def write_confusion(rows: list[dict[str, Any]], output_dir: Path) -> None:
+    """Write the intent confusion matrix as markdown + JSON."""
+    data = intent_confusion(rows)
+    if not data["matrix"]:
+        return
+    preds = sorted({p for row in data["matrix"].values() for p in row})
+    lines = ["# Intent Confusion Matrix (expected → predicted)", "",
+             "| expected \\ predicted | " + " | ".join(preds) + " |",
+             "|---|" + "---|" * len(preds)]
+    for exp in sorted(data["matrix"]):
+        cells = " | ".join(str(data["matrix"][exp].get(p, 0)) for p in preds)
+        lines.append(f"| {exp} | {cells} |")
+    lines += ["", "## Top confused pairs", ""]
+    for item in data["top_confused"][:10]:
+        lines.append(f"- {item['expected']} → {item['predicted']}: {item['count']} "
+                     f"(e.g. {', '.join(item['examples'])})")
+    (output_dir / "intent_confusion.md").write_text("\n".join(lines), encoding="utf-8")
+    (output_dir / "intent_confusion.json").write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -324,6 +375,7 @@ def run_eval(eval_file: Path, output_dir: Path) -> dict[str, float]:
     for item in regression[:15]:
         failure_lines.append(f"- {item['id']} ({item['task_type']}): {', '.join(item['failure_tags'])}")
     (output_dir / "failure_cases.md").write_text("\n".join(failure_lines), encoding="utf-8")
+    write_confusion(rows, output_dir)
 
     (output_dir / "regression_set.jsonl").write_text(
         "\n".join(json.dumps(item, ensure_ascii=False) for item in regression), encoding="utf-8"

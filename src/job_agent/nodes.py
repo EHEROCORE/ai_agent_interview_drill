@@ -20,9 +20,17 @@ import time
 from pathlib import Path
 from typing import Any, Callable, TypedDict
 
+from job_agent.acl import audit as acl_audit
 from job_agent.guardrails import check_claim_grounding, classify_input, redact_sensitive
 from job_agent.hybrid import HybridRetriever
-from job_agent.llm import classify_intent, rewrite_query, select_retrievers
+from job_agent.llm import (
+    LOW_CONFIDENCE_THRESHOLD,
+    _dedup_terms,
+    llm_rewrite_query,
+    rewrite_query,
+    route_intent,
+    source_types_for,
+)
 from job_agent.rag import HybridRAGIndex
 from job_agent.rerank import rerank
 from job_agent.schemas import (
@@ -49,6 +57,8 @@ from job_agent.tools import (
 
 MAX_RETRIEVAL_ROUNDS = 2
 RETRIEVAL_TOP_K = 10
+# Below this many source-filtered results, broaden back to unfiltered retrieval.
+MIN_SOURCE_EVIDENCE = 3
 
 
 def _jsonable(value: Any) -> Any:
@@ -86,6 +96,9 @@ class GraphState(TypedDict, total=False):
 
     intent: str
     selected_retrievers: list[str]
+    intent_confidence: float
+    source_routing_fallbacks: int
+    base_query: str
     tool_trace: list[ToolTrace]
     node_trace: list[NodeTrace]
     retrieval_rounds: int
@@ -205,14 +218,32 @@ def parse_cv(state: GraphState, store: SessionStore | None = None) -> GraphState
 
 
 def intent_route(state: GraphState, store: SessionStore | None = None) -> GraphState:
-    """Classify intent and select logical retrievers (Agentic RAG routing)."""
+    """Route the request: intent + retrievers + confidence, and (LLM) one query rewrite."""
     request = state["request"]
-    intent = classify_intent(request, state.get("requirements", []))
-    return {"intent": intent, "selected_retrievers": select_retrievers(intent)}
+    decision = route_intent(request, state.get("requirements", []))
+    update: GraphState = {
+        "intent": decision["intent"],
+        "selected_retrievers": decision["retrievers"],
+        "intent_confidence": decision["confidence"],
+    }
+    if decision["rewrite_needed"]:
+        rewritten = llm_rewrite_query(request)  # None unless llm_mode=auto + key
+        if rewritten:
+            update["base_query"] = rewritten
+    return update
 
 
 def _build_query(request: PrepareRequest, requirements: list[Requirement], extra: list[str] | None = None) -> str:
     return rewrite_query(request, requirements, extra)
+
+
+def _compose_query(state: GraphState, extra: list[str] | None = None) -> str:
+    """Build the retrieval query, preferring the LLM-rewritten base query when present."""
+    requirements = state.get("requirements", [])
+    base = state.get("base_query")
+    if base:
+        return _dedup_terms([base] + [item.name for item in requirements] + (extra or []))
+    return _build_query(state["request"], requirements, extra)
 
 
 def _ensure_index(state: GraphState) -> HybridRAGIndex:
@@ -228,19 +259,30 @@ def _ensure_index(state: GraphState) -> HybridRAGIndex:
     return index
 
 
-def _run_retrieval(
-    state: GraphState, store: SessionStore | None, query: str, extra_args: dict[str, Any] | None = None
-) -> list[RetrievedChunk]:
-    """Dispatch retrieval by ``retrieval_mode`` (hybrid vs deterministic), then rerank.
+def _source_types_for_state(state: GraphState) -> set[str] | None:
+    """Compute the source-type filter for routing (None = broad / disabled)."""
+    request = state["request"]
+    if not request.source_routing:
+        return None
+    retrievers = state.get("selected_retrievers") or []
+    # Low confidence -> broaden (do not narrow the candidate pool).
+    if not retrievers or state.get("intent_confidence", 1.0) < LOW_CONFIDENCE_THRESHOLD:
+        return None
+    return source_types_for(retrievers) or None
 
-    ``hybrid`` uses the BM25+dense RRF retriever (built once and cached on state);
-    ``deterministic`` uses the lexical index. Retrieval is cached via the tool cache.
-    """
+
+def _retrieve_once(
+    state: GraphState, store: SessionStore | None, query: str,
+    source_types: set[str] | None, extra_args: dict[str, Any] | None,
+) -> list[RetrievedChunk]:
+    """Single retrieval dispatch (hybrid/dense/deterministic) with optional source filter."""
     request = state["request"]
     index = _ensure_index(state)
     user_roles = list(request.user_roles) + [f"tenant:{request.tenant_id}"]
+    st = set(source_types) if source_types else None
     args = {"query": query, "top_k": RETRIEVAL_TOP_K, "tenant_id": request.tenant_id,
-            "mode": request.retrieval_mode, **(extra_args or {})}
+            "mode": request.retrieval_mode,
+            "source_types": sorted(st) if st else None, **(extra_args or {})}
 
     if request.retrieval_mode in ("hybrid", "dense"):
         retriever = state.get("retriever")
@@ -248,32 +290,67 @@ def _run_retrieval(
             retriever = HybridRetriever(index)
             state["retriever"] = retriever
         if request.retrieval_mode == "dense":
-            tool_name = "dense_retrieval_tool"
-            query_fn = retriever.query_dense
+            tool_name, query_fn = "dense_retrieval_tool", retriever.query_dense
         else:
-            tool_name = "hybrid_retrieval_tool"
-            query_fn = retriever.query
+            tool_name, query_fn = "hybrid_retrieval_tool", retriever.query
         raw = _trace_tool(
             state, store, tool_name, args,
-            lambda: query_fn(query, top_k=RETRIEVAL_TOP_K,
-                             tenant_id=request.tenant_id, user_roles=user_roles),
+            lambda: query_fn(query, top_k=RETRIEVAL_TOP_K, tenant_id=request.tenant_id,
+                             user_roles=user_roles, source_types=st),
             use_cache=True, retries=1, fallback=lambda: [],
         )
     else:
         raw = _trace_tool(
             state, store, "rag_retrieval_tool", args,
             lambda: rag_retrieval_tool(index, query, top_k=RETRIEVAL_TOP_K,
-                                       tenant_id=request.tenant_id, user_roles=user_roles),
+                                       tenant_id=request.tenant_id, user_roles=user_roles,
+                                       source_types=st),
             use_cache=True, retries=1, fallback=lambda: [],
         )
     if isinstance(raw, list) and raw and not isinstance(raw[0], RetrievedChunk):
         raw = [RetrievedChunk.model_validate(item) for item in raw]
-    return rerank(query, raw, top_k=RETRIEVAL_TOP_K)
+    return raw
+
+
+def _run_retrieval(
+    state: GraphState, store: SessionStore | None, query: str, extra_args: dict[str, Any] | None = None
+) -> list[RetrievedChunk]:
+    """Retrieve + rerank, with source-level routing and a broaden-on-insufficient fallback.
+
+    Source routing filters the candidate pool by ``selected_retrievers``; if that leaves too
+    little evidence (``MIN_SOURCE_EVIDENCE``), it broadens back to unfiltered retrieval so
+    routing never silently tanks recall. Low confidence skips filtering entirely.
+    """
+    request = state["request"]
+    user_roles = list(request.user_roles) + [f"tenant:{request.tenant_id}"]
+    source_types = _source_types_for_state(state)
+
+    raw = _retrieve_once(state, store, query, source_types, extra_args)
+    ranked = rerank(query, raw, top_k=RETRIEVAL_TOP_K)
+    if source_types is not None and len(ranked) < MIN_SOURCE_EVIDENCE:
+        # Source filter was too narrow -> broaden to protect recall.
+        state["source_routing_fallbacks"] = state.get("source_routing_fallbacks", 0) + 1
+        broad = _retrieve_once(state, store, query, None, {**(extra_args or {}), "broaden": True})
+        ranked = rerank(query, broad, top_k=RETRIEVAL_TOP_K)
+
+    # Independent post-retrieval ACL audit (defense-in-depth); pre-filter should make
+    # this a no-op, but a denial here would be a real leak and is traced.
+    allowed, denied = acl_audit(ranked, tenant_id=request.tenant_id, user_roles=user_roles)
+    if denied:
+        state["acl_denied"] = state.get("acl_denied", 0) + len(denied)
+        trace = ToolTrace(
+            tool_name="acl_audit", args_hash="post_retrieval",
+            status="ok", latency_ms=0.0, observation={"denied": denied},
+        )
+        state.setdefault("tool_trace", []).append(trace)
+        if store:
+            store.append_trace(state["session_id"], trace)
+    return allowed
 
 
 def retrieve(state: GraphState, store: SessionStore | None = None) -> GraphState:
     """Build the tenant-scoped index and run the first retrieval round."""
-    query = _build_query(state["request"], state.get("requirements", []))
+    query = _compose_query(state)
     start = time.perf_counter()
     citations = _run_retrieval(state, store, query)
     return {
@@ -298,7 +375,6 @@ def match(state: GraphState, store: SessionStore | None = None) -> GraphState:
 
 def evidence_check(state: GraphState, store: SessionStore | None = None) -> GraphState:
     """Agentic retrieval loop: while gaps remain, rewrite query and retrieve again."""
-    request = state["request"]
     _ensure_index(state)  # rebuilt lazily when resuming mid-pipeline
     rounds = state.get("retrieval_rounds", 1)
     citations = list(state.get("citations", []))
@@ -309,7 +385,7 @@ def evidence_check(state: GraphState, store: SessionStore | None = None) -> Grap
         if not gaps:
             break
         rounds += 1
-        query = _build_query(request, state.get("requirements", []), extra=gaps + ["project", "experience"])
+        query = _compose_query(state, extra=gaps + ["project", "experience"])
         supplementary = _run_retrieval(state, store, query, extra_args={"round": rounds})
         seen = {c.citation_id for c in citations}
         citations.extend(c for c in supplementary if c.citation_id not in seen)

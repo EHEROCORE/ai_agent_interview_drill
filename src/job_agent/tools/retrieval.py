@@ -65,12 +65,14 @@ def rag_retrieval_tool(
     top_k: int = 5,
     tenant_id: str | None = None,
     user_roles: list[str] | None = None,
+    source_types: set[str] | None = None,
 ) -> list[RetrievedChunk]:
-    """Retrieve cited evidence from the local RAG index with tenant/ACL enforcement."""
+    """Retrieve cited evidence from the local RAG index with tenant/ACL/source enforcement."""
     return index.query(
         query=query,
         filters=filters,
         top_k=top_k,
         tenant_id=tenant_id,
         user_roles=user_roles,
+        source_types=source_types,
     )

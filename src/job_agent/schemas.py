@@ -25,6 +25,7 @@ class PrepareRequest(AgentBaseModel):
     user_roles: list[str] = Field(default_factory=lambda: ["public"])
     retrieval_mode: Literal["deterministic", "dense", "hybrid"] = "deterministic"
     llm_mode: Literal["off", "auto"] = "off"
+    source_routing: bool = False
 
     @field_validator("company", "role", "target_interview_type")
     @classmethod

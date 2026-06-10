@@ -117,11 +117,12 @@ class HybridRAGIndex:
         top_k: int = 5,
         tenant_id: str | None = None,
         user_roles: list[str] | None = None,
+        source_types: set[str] | None = None,
     ) -> list[RetrievedChunk]:
         """Retrieve top chunks using lexical cosine plus keyword overlap.
 
-        Enforces tenant isolation (``tenant_id``) and ACL (``user_roles``) as hard
-        payload filters before scoring, mirroring a production vector-store filter.
+        Enforces tenant isolation (``tenant_id``), ACL (``user_roles``) and optional
+        ``source_types`` (source-level routing) as hard filters before scoring.
         """
         filters = filters or {}
         query_tokens = Counter(tokenize(query))
@@ -131,6 +132,8 @@ class HybridRAGIndex:
             if any(chunk.metadata.get(key) != value for key, value in filters.items()):
                 continue
             if tenant_id is not None and chunk.metadata.get("tenant_id", "default") != tenant_id:
+                continue
+            if source_types is not None and chunk.metadata.get("source_type") not in source_types:
                 continue
             if not self._acl_ok(chunk, user_roles):
                 continue

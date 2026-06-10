@@ -1,8 +1,12 @@
-"""Two-layer reranking: deterministic heuristic default + optional cross-encoder.
+"""Reranking backends: deterministic heuristic default + optional real rerankers.
 
-The heuristic reranker keeps the pipeline offline and reproducible. When
-``JOB_AGENT_RERANKER=cross-encoder`` is set and ``sentence-transformers`` is available,
-a real cross-encoder is used; any failure degrades back to the heuristic.
+``JOB_AGENT_RERANKER`` selects the backend; all degrade to the heuristic on failure:
+
+* ``heuristic`` (default) — offline blend of retrieval score / overlap / coverage.
+* ``none`` — passthrough (keep fusion order); the rerank A/B baseline.
+* ``api`` — hosted cross-encoder via an OpenAI-style ``/rerank`` endpoint
+  (e.g. SiliconFlow ``Qwen/Qwen3-Reranker-8B``) — runs on an API key, no torch.
+* ``cross-encoder`` — local ``sentence-transformers`` CrossEncoder (needs torch).
 """
 
 from __future__ import annotations
@@ -36,12 +40,53 @@ def rerank(
 ) -> list[RetrievedChunk]:
     """Rerank using the configured backend, defaulting to the heuristic reranker."""
     backend = os.environ.get("JOB_AGENT_RERANKER", "heuristic").lower()
+    if backend == "none":
+        return chunks[: top_k or len(chunks)]
+    if backend == "api":  # pragma: no cover - needs network + key
+        try:
+            return _api_rerank(query, chunks, top_k)
+        except Exception:
+            return heuristic_rerank(query, chunks, top_k)
     if backend == "cross-encoder":  # pragma: no cover - optional heavy backend
         try:
             return _cross_encoder_rerank(query, chunks, top_k)
         except Exception:
             return heuristic_rerank(query, chunks, top_k)
     return heuristic_rerank(query, chunks, top_k)
+
+
+def _rerank_api_key() -> str:
+    return (
+        os.environ.get("JOB_AGENT_RERANK_API_KEY")
+        or os.environ.get("SILICONFLOW_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or ""
+    )
+
+
+def _api_rerank(  # pragma: no cover - needs network + key
+    query: str, chunks: list[RetrievedChunk], top_k: int | None
+) -> list[RetrievedChunk]:
+    """Rerank via a hosted cross-encoder ``/rerank`` endpoint (SiliconFlow-compatible)."""
+    import httpx
+
+    api_key = _rerank_api_key()
+    if not api_key:
+        raise RuntimeError("API reranker requires a rerank API key.")
+    base = os.environ.get("JOB_AGENT_RERANK_API_BASE", "https://api.siliconflow.com/v1")
+    model = os.environ.get("JOB_AGENT_RERANK_MODEL", "Qwen/Qwen3-Reranker-8B")
+    documents = [chunk.text for chunk in chunks]
+    response = httpx.post(
+        f"{base}/rerank",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": model, "query": query, "documents": documents,
+              "top_n": top_k or len(documents)},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    results = response.json()["results"]
+    ranked = sorted(results, key=lambda r: float(r["relevance_score"]), reverse=True)
+    return [chunks[r["index"]] for r in ranked][: top_k or len(chunks)]
 
 
 def _cross_encoder_rerank(  # pragma: no cover - optional heavy backend

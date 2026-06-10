@@ -46,7 +46,8 @@ _MODEL_KEYS = {
 _SCALAR_KEYS = {
     "cv_text", "session_id", "request_id", "interview_questions", "report",
     "report_path", "retrieval_rounds", "cache_hits", "retrieval_latency_ms",
-    "ttft_ms", "status", "failed_node", "intent", "selected_retrievers",
+    "ttft_ms", "status", "failed_node", "intent", "selected_retrievers", "base_query",
+    "intent_confidence", "source_routing_fallbacks",
 }
 
 
